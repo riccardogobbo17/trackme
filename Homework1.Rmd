@@ -1,0 +1,320 @@
+---
+title: "Homework1_G15"
+authors: "Adriano Fragomeni, Riccardo Gobbo, Ufuk Caliskan"
+output: html_document
+runtime: shiny
+---
+
+##Import Libraries
+```{r message=FALSE, warning=FALSE}
+library(ggmap)
+library(gplots)
+library(plyr)
+library(pracma)
+library(shiny)
+library(Matrix)
+library(ks)
+library(sparr)
+require(data.table)
+library(MASS)
+library(meanShiftR)
+library(plotly)
+source("Function.R")
+```
+
+The goal of this project is to study data coming from a tracking device where there are 60 tracks:
+the first part of this project is to try to estimate the density with the gaussian KDE and to use mean-shift
+algorithm to cluster points.
+The second part is to consider each point as an element of a track and to find the top-5 paths and the bottom-5
+paths, using the Boxcar Kernel estimation of the Hausdorff distances between each track.
+
+##LOAD DATA
+
+The original dataset is based on 5 columns:
+1)longitude
+2)latitude
+3)elevation
+4)time
+5)run-id
+
+For the following analysis the relevant variable are just three:
+1)longitude
+2)latitude
+3)time 
+
+```{r}
+# load data 
+load("trackme.RData")
+df <- as.data.frame(cbind(runtrack$lon,runtrack$lat, runtrack$time))
+colnames(df) = c("lon", "lat", "DT")
+set<-split(df,runtrack$id)
+# number of tracks
+n<-length(set)  
+```
+
+The dataset is large, around $60000$ points, beacause the data comes from a tracking device, and so it is
+possible that there is noise, so to remove it, the "noise" function was used:
+for each run it removes the rows where the time difference is smaller than 5 seconds
+
+```{r}
+#Clean data
+set.cleaned<-lapply(set, noise)
+subtrack <- ldply(set.cleaned, data.frame)
+subtrack <- subtrack[,c(2,3)]
+set<-split(df,runtrack$id)
+```
+
+After cleaning data, the new dataset has around 30000 observations; the next step is to visualize them to have a
+general idea on how they are allocated on the Rome map
+
+```{r message=FALSE, warning=FALSE}
+# Map boundaries 
+location<- c(min(subtrack$lon, na.rm = T), min(subtrack$lat, na.rm = T), 
+             max(subtrack$lon, na.rm = T), max(subtrack$lat, na.rm = T))
+# Get the map from Google
+myMapInD <- get_map(location = location, maptype = "roadmap", zoom = 13)
+# Plot gps coordinates 
+gp<-plot.map(myMapInD,subtrack,.5,I("red"),.03,'points on Rome map')
+
+print(gp)
+```
+
+Some qualitative observations can be done by looking directly this plot,:
+The points are more concentrated in the range of $latitude=(12.500-12.550)$ and $longitude=(41.90-41.92)$, so it
+is likely that there will be some peaks of the KDE in this area.
+Let us zoom in this area to show better what happens there:
+
+```{r warning=FALSE}
+# Zoom in
+zoom<- c(12.500, 41.90, 12.550, 41.92) 
+# Get the map from Google and plot 
+reMapInD <- get_map(location = zoom, maptype = "roadmap") 
+gp<-plot.map(reMapInD,subtrack,1,I("red"),.05,'Zoom of more concetrated points')
+print(gp)
+
+```
+
+#FIRST PART
+
+##CHOOSING BANDWIDTH
+
+The bandwidths are the crucial selected parameters which are necessary to obtain a good estimation of density; if
+the selected bandwidths are too small, the estimation will be rough (undersmoothing), while larger bandwidths
+give large smoother estimates (oversmoothing).
+Since we are going to use not scaled data, the bandwidth is calculated for each dimension ('lat','lon')
+
+```{r}
+#bandwidth
+h <- c(bw.nrd(subtrack$lon),bw.nrd(subtrack$lat))
+h
+```
+
+The function above uses a rule of thumb to calculate the bandwidth of data, using the Scott factor:
+$n^{\frac{-1}{d+4}}$
+where $n$ is the number of data points and $d$ is the number of dimensions.
+
+##KDE
+
+After having fixed 'h', we can calculate the Gaussian kernel function to estimate the density of data, in
+contrast to the bandwidth the choice of the shape of the Kernel does not influence the KDE.
+In this project the Gaussian kernel is chosen:
+
+$K(x)=\frac{1}{\sqrt{2\pi}}\times{\exp(-\frac{x^2}{2})}$
+
+```{r}
+#Kernel density estimation
+kd <- kde2d(subtrack$lon, subtrack$lat, h = h)
+#plot kernel
+p3 <- plot_ly(x = kd$x, y = kd$y, z = kd$z)%>% add_surface()
+p3
+```
+
+From the plot, it seems that there can be at least four clusters:
+three of them are associated to the three highest peaks of the estimated density and the other one has points
+with lower density.
+
+##MEAN SHIFT
+
+The mean-shift algorithm is used to cluster data, as following:
+Given a dataset $X=\{X_1,...,X_n\} \quad iid\quad p$, we construct an estimate $\hat{p}$ of the density.
+Let $\{\hat{m_1},..,\hat{m_k}\}$ be the estimated modes, and let$\{\hat{A}_k\}_{k=1}^K$ be the corresponding
+ascending sets of points implied by $\hat{p}$.
+The empirical clusters $\{C_1,...,C_k\}$ are defined as
+$C_k=\{X_i:X_i \in \hat{A_k}), \forall k \in \{1,..,K\}$
+To do this, the 'meannShift' function of the package 'meanshiftR' was used, although data are cleaned, each point
+is really close to each other in terms of coordinates, so if the mean-shift algorithm runs without parameters,
+apart from the 'h', there will be just one cluster
+
+```{r}
+# mean-shift algorithm
+ms1 <- meanShift(as.matrix(subtrack), bandwidth = h)
+```
+
+and one mode, which corresponds to the highest peak of the KDE
+
+```{r}
+# modes of cluster
+modes1<-as.data.frame(unique(ms1$value))
+colnames(modes1)<-c('lon','lat')
+
+```
+
+it means that each points are attracted by this peak and so they are going to set just one cluster, as you can
+see from the following plot
+
+```{r}
+# plot cluster
+gp<-plot.map(myMapInD,subtrack,.4,ms1$assignment,.08,'Bad mean-shift')+geom_point(data=modes1,aes(x=lon,y=lat),col='brown',size=3,shape=18)
+
+print(gp)
+```
+
+but this is not good, it means that we put all points in one set and so there is not any relevant information, so
+the 'epsilonCluster' parameter was introduced to avoid this problem, indeed it is the minimum distance between
+distinct clusters, the chosen value is equal to $1.8e-7$ because points are very close to each other, for this
+reason the value is small.
+Run the mean-shift, using this new parameter
+
+```{r}
+# mean-shift algorithm
+ms <- meanShift(as.matrix(subtrack), bandwidth = h, epsilonCluster = 1.8e-7)
+```
+
+The number of the cluster are 6 and the coordinates of these modes are the following one
+
+```{r}
+# modes of cluster
+modes<-as.data.frame(unique(ms$value))
+colnames(modes)<-c('lon','lat')
+```
+
+Take a look at the cluster, plotting them on the Rome map
+
+```{r}
+# plot cluster
+gp<-plot.map(myMapInD,subtrack,.4,ms$assignment,.08,'Good mean-shift')+geom_point(data=modes,aes(x=lon,y=lat),col='brown',size=3,shape=18)
+
+print(gp)
+```
+
+This cluster is completely different from the previous one, the reason is that the 'epsilonCluster' parameter
+allows to cluster data; as you can see, the area with the lowest density on the left of the plot is divided in
+three clusters, this means that the algorithm finds three relevant peaks instead of the qualitativie analysis
+done by looking the KDE plot, whereas on the right of the plot, where there is a majority concentration of points
+there are also three clusters, probably associated to the peaks that it is possible to see by looking at the plot
+of the KDE, as it was said before.
+
+
+#SECOND PART
+
+Actually each point is not a single point in a plane, but it is a part of a track, a single curve in the plane.
+
+##HAUSDORFF DISTANCE
+
+To identify which tracks belong to the top-5 and bottom-5, the first thing to do is to create a matrix 60x60,
+where 60 is the number of the total tracks, with the distance of each track to the others, to do this the
+Hausdorff metric is used.
+In this metric it is possible to define the Hausdorff distance
+Given 2 sets of points $A$ and $B$:
+
+$dist_H(A,B)=max\{sup(x \in A)inf(y\in B)dist(x,y),sup(x \in B)inf(y\in A)dist(x,y)\}$
+
+How does the Hausdorff distance work?
+Given a curve $\gamma$, it is possible to calculate $dist_H(\gamma,G_i)$, it depends only on the distance
+$dist(x,y)$ between each point in $\gamma$ and $G_i$, which is calculated using the Euclidean distance.
+
+```{r}
+# Hausdorff matrix
+mat<-haud_dist(set.cleaned,n)
+rowscols <- which(upper.tri(mat), arr.ind=TRUE)
+mat<-sparseMatrix(i=rowscols[,1],    #rows to fill in
+             j=rowscols[,2],    #cols to fill in
+             x=mat[upper.tri(mat)], #values to use 
+             symmetric=TRUE,    #make it symmetric
+             dims=c(nrow(mat),nrow(mat))) #dimensions
+```
+
+##TOP-5 AND BOTTOM-5 TRACKS
+
+Also in this situation the estimation of the curve's density is relevant to find the top-5 and the bottom-5, in
+this case we are going to estimate it using the unormalized boxcar-Kernel estimator:
+
+$\hat{q_{\epsilon}(\gamma)=\frac{1}{n}\displaystyle\sum_{i=1}^{n}I(dist_H(\gamma,G_i)\leq\epsilon)}$
+
+As you can see from the above formula, the choice of $\epsilon$ is important to explore and analyze tracks, so
+the best idea is to explore data for different values of $\epsilon$ and see what happens
+
+```{r}
+# behaviour of kernel by epsilon
+inputPanel(
+  sliderInput("epsilon", label = "epsilon", min = 0.001, value = 0.011, max = 0.1, step = 0.0001))
+
+q.kern <- reactive({q_density(mat, input$epsilon,n)})
+
+renderPlot({
+  plot.kern(q.kern())
+})
+
+```
+
+The plot above shows the behaviour of curve's density, it changes by varying $\epsilon$, if it is too small, for
+example 0.002 or 0.003, it is possible to see that we have a straight line close to zero ( it means that many
+curves have a small density) and just a few of them with an higher one; increasing $\epsilon$ the density tends
+to vary a lot, whereas if the $\epsilon$ values is too large, around 0.062, there is an opposite situation of the
+small $\epsilon$, in which the majority of curves have a maximum density (1) and a few curves with lower one,
+when the $\epsilon$ is larger than 0.063 all curves have a density equal to 1,as it is possible to imagine if you
+look at the formula of boxcar-kernel estimator.
+The following analysis is based on just 4 values of $\epsilon$, one of them is chosen by looking at the plot
+(0.0115) and the other three using the quantiles of the Hausdorff distances (25%,50%,75%) 
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+#quantile of Hausdorff distance
+eps<-unname(round(quantile(mat,probs=c(0.25,0.5,0.75)),4))
+eps<-c(eps,0.0110)
+```
+
+Now plot the top-5 and bottom-5 paths for these four values of $\epsilon$
+
+```{r}
+# plot
+inputPanel(
+  selectInput("eps", label = "eps", choices = eps,selected = eps[4]))
+
+q.kern1 <- reactive({q_density(mat, input$eps,n)})
+
+#min tracks
+renderTable({min.find(q.kern1())})
+
+renderPlot({
+  plot.path(myMapInD,df.min(runtrack,set.cleaned,min.find(q.kern1())),1.5,.6,'Bottom-5 tracks')})
+
+#max tracks
+renderTable({max.find(q.kern1())})
+
+renderPlot({
+plot.path(myMapInD,df.max(runtrack,set.cleaned,max.find(q.kern1())),1.5,.6,'Top-5 tracks')})
+
+```
+
+The value of chosen $\epsilon$, looking at the data, is equal to the first quantile of Hausdorff distance, so the
+result are completely the same.
+It is possible to see that for each value of $\epsilon$, taken into account, the runtrack 2 and 3 are always in
+the bottom-5, so it means that they are the less frequent tracks that you (Pierpaolo) run.
+The top-5 tracks are often in the same area of Rome (close to Sapienza University and via Tiburtina), so probably
+this is your favorite area where you go to have fun, just the third quantile shows that you love Villa
+Borghese....you know...it is a park...amazing place!!!
+
+#CONCLUSION
+From all this information we can conclude that you live, probably, in this area
+
+```{r}
+zoom<- c(12.530, 41.90, 12.550, 41.92) 
+# Get the map from Google (default) and plot 
+# Get the map from Google and plot 
+reMapInD <- get_map(location = zoom, maptype = "roadmap") 
+gp<-plot.map(reMapInD,subtrack,1,I("red"),.05,'Your Home')
+print(gp)
+
+```
+
+
